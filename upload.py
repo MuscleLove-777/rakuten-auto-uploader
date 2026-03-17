@@ -384,50 +384,47 @@ def post_to_rakuten_blog(image_path, title, content):
 
             # ログインページかチェック
             if 'id.rakuten' in page.url or 'login' in page.url.lower() or 'nid' in page.url:
-                print("Login page detected, entering credentials...")
+                print("Login page detected (2-step login)...")
 
-                # ユーザーID入力 - 複数のセレクタを試す
-                user_selectors = ['input[name="u"]', 'input#loginInner_u', 'input[id="user_id"]', 'input[name="login_id"]']
-                for sel in user_selectors:
-                    try:
-                        el = page.locator(sel).first
-                        if el.is_visible(timeout=3000):
-                            el.fill(RAKUTEN_USER_ID)
-                            print(f"  User ID filled via: {sel}")
-                            break
-                    except Exception:
-                        continue
-                time.sleep(1)
+                # ===== Step 1a: ユーザID入力 =====
+                try:
+                    # テキスト入力欄を探す（2ステップ式の最初の画面）
+                    user_input = page.locator('input[type="text"], input[type="email"], input[name="u"]').first
+                    user_input.fill(RAKUTEN_USER_ID)
+                    print(f"  User ID filled: {RAKUTEN_USER_ID[:3]}***")
+                    time.sleep(1)
 
-                # パスワード入力
-                pass_selectors = ['input[name="p"]', 'input#loginInner_p', 'input[id="password_current"]', 'input[type="password"]']
-                for sel in pass_selectors:
-                    try:
-                        el = page.locator(sel).first
-                        if el.is_visible(timeout=3000):
-                            el.fill(RAKUTEN_PASSWORD)
-                            print(f"  Password filled via: {sel}")
-                            break
-                    except Exception:
-                        continue
-                time.sleep(1)
+                    # 「次へ」ボタンをクリック
+                    next_btn = page.locator('button:has-text("次へ"), input[value*="次へ"], button[type="submit"]').first
+                    next_btn.click()
+                    print("  'Next' button clicked")
+                    time.sleep(3)
+                except Exception as e:
+                    print(f"  User ID step failed: {e}")
 
-                # ログインボタン
-                login_selectors = ['input[name="submit"]', 'input[type="submit"]', 'button[type="submit"]', 'input[value*="ログイン"]']
-                for sel in login_selectors:
-                    try:
-                        el = page.locator(sel).first
-                        if el.is_visible(timeout=3000):
-                            el.click()
-                            print(f"  Login button clicked: {sel}")
-                            break
-                    except Exception:
-                        continue
-                time.sleep(5)
+                page.screenshot(path='debug_after_userid.png')
+                print(f"  After user ID URL: {page.url}")
+
+                # ===== Step 1b: パスワード入力 =====
+                try:
+                    # パスワード入力欄が表示されるのを待つ
+                    pass_input = page.locator('input[type="password"]').first
+                    pass_input.wait_for(state='visible', timeout=10000)
+                    pass_input.fill(RAKUTEN_PASSWORD)
+                    print("  Password filled")
+                    time.sleep(1)
+
+                    # ログインボタンをクリック
+                    login_btn = page.locator('button:has-text("ログイン"), input[value*="ログイン"], button[type="submit"]').first
+                    login_btn.click()
+                    print("  Login button clicked")
+                    time.sleep(5)
+                except Exception as e:
+                    print(f"  Password step failed: {e}")
 
                 print(f"After login URL: {page.url}")
                 page.screenshot(path='debug_after_login.png')
-            elif 'diarywrite' in page.url or 'plaza.rakuten' in page.url:
+            elif 'diary' in page.url and 'my.plaza' in page.url:
                 print("Already logged in!")
             else:
                 print(f"Unexpected page: {page.url}")
