@@ -1,0 +1,7 @@
+media/
+uploaded.json
+rakuten_cookies.json
+debug_*.png
+__pycache__/
+*.pyc
+.env

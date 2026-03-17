@@ -1,0 +1,4 @@
+requests
+gdown
+pytrends
+playwright

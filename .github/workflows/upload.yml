@@ -1,0 +1,71 @@
+name: Rakuten Blog Auto Post
+
+on:
+  schedule:
+    - cron: '0 23 * * *'
+    - cron: '0 7 * * *'
+    - cron: '0 15 * * *'
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install requests gdown pytrends playwright
+          playwright install chromium --with-deps
+
+      - name: Download uploaded log
+        continue-on-error: true
+        run: |
+          gh run download --name uploaded-log --dir . 2>/dev/null || echo "No previous log found"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download saved cookies
+        continue-on-error: true
+        run: |
+          gh run download --name rakuten-cookies --dir . 2>/dev/null || echo "No previous cookies found"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run upload
+        env:
+          RAKUTEN_USER_ID: ${{ secrets.RAKUTEN_USER_ID }}
+          RAKUTEN_PASSWORD: ${{ secrets.RAKUTEN_PASSWORD }}
+          RAKUTEN_BLOG_ID: ${{ secrets.RAKUTEN_BLOG_ID }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: python upload.py
+
+      - name: Save uploaded log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uploaded-log
+          path: uploaded.json
+          overwrite: true
+
+      - name: Save cookies
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rakuten-cookies
+          path: rakuten_cookies.json
+          overwrite: true
+
+      - name: Save debug screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug_*.png
+          overwrite: true
