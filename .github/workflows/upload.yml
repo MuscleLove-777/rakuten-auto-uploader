@@ -63,7 +63,7 @@ jobs:
           overwrite: true
 
       - name: Save debug screenshots
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots

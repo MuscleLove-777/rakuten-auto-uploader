@@ -370,49 +370,106 @@ def post_to_rakuten_blog(image_path, title, content):
 
         try:
             # ============================================
-            # Step 1: ログイン
+            # Step 1: まず楽天にログイン
             # ============================================
             print("Step 1: Logging in to Rakuten...")
-            page.goto('https://plaza.rakuten.co.jp/diarywrite/', wait_until='domcontentloaded', timeout=30000)
+
+            # 直接ログインページに行く
+            login_url = 'https://grp01.id.rakuten.co.jp/rms/nid/vc?__event=LOGIN&service_id=top&return_url=https%3A%2F%2Fplaza.rakuten.co.jp%2F' + RAKUTEN_BLOG_ID + '%2Fdiarywrite%2F'
+            page.goto(login_url, wait_until='domcontentloaded', timeout=30000)
             time.sleep(3)
 
-            # ログインページにリダイレクトされた場合
-            if 'grp' in page.url and 'LOGIN' in page.url.upper() or 'id.rakuten' in page.url:
+            print(f"Login page URL: {page.url}")
+            page.screenshot(path='debug_login.png')
+
+            # ログインページかチェック
+            if 'id.rakuten' in page.url or 'login' in page.url.lower() or 'nid' in page.url:
                 print("Login page detected, entering credentials...")
 
-                # ユーザーID入力
-                user_field = page.locator('input[name="u"], input[id="loginInner_u"]').first
-                user_field.fill(RAKUTEN_USER_ID)
+                # ユーザーID入力 - 複数のセレクタを試す
+                user_selectors = ['input[name="u"]', 'input#loginInner_u', 'input[id="user_id"]', 'input[name="login_id"]']
+                for sel in user_selectors:
+                    try:
+                        el = page.locator(sel).first
+                        if el.is_visible(timeout=3000):
+                            el.fill(RAKUTEN_USER_ID)
+                            print(f"  User ID filled via: {sel}")
+                            break
+                    except Exception:
+                        continue
                 time.sleep(1)
 
                 # パスワード入力
-                pass_field = page.locator('input[name="p"], input[id="loginInner_p"]').first
-                pass_field.fill(RAKUTEN_PASSWORD)
+                pass_selectors = ['input[name="p"]', 'input#loginInner_p', 'input[id="password_current"]', 'input[type="password"]']
+                for sel in pass_selectors:
+                    try:
+                        el = page.locator(sel).first
+                        if el.is_visible(timeout=3000):
+                            el.fill(RAKUTEN_PASSWORD)
+                            print(f"  Password filled via: {sel}")
+                            break
+                    except Exception:
+                        continue
                 time.sleep(1)
 
                 # ログインボタン
-                login_btn = page.locator('input[type="submit"], button[type="submit"]').first
-                login_btn.click()
+                login_selectors = ['input[name="submit"]', 'input[type="submit"]', 'button[type="submit"]', 'input[value*="ログイン"]']
+                for sel in login_selectors:
+                    try:
+                        el = page.locator(sel).first
+                        if el.is_visible(timeout=3000):
+                            el.click()
+                            print(f"  Login button clicked: {sel}")
+                            break
+                    except Exception:
+                        continue
                 time.sleep(5)
 
-                # ログイン後のページを確認
                 print(f"After login URL: {page.url}")
-
-                if 'error' in page.url.lower() or 'login' in page.url.lower():
-                    print("Login may have failed. Trying to continue anyway...")
+                page.screenshot(path='debug_after_login.png')
+            elif 'diarywrite' in page.url or 'plaza.rakuten' in page.url:
+                print("Already logged in!")
             else:
-                print("Already logged in (cookies worked)")
+                print(f"Unexpected page: {page.url}")
 
             # ============================================
             # Step 2: 日記作成ページに移動
             # ============================================
             print("Step 2: Navigating to diary write page...")
-            page.goto(f'https://plaza.rakuten.co.jp/{RAKUTEN_BLOG_ID}/diarywrite/',
-                      wait_until='domcontentloaded', timeout=30000)
-            time.sleep(3)
+
+            # すでにdiarywriteにいなければ移動
+            diary_url = f'https://plaza.rakuten.co.jp/{RAKUTEN_BLOG_ID}/diarywrite/'
+            if 'diarywrite' not in page.url:
+                page.goto(diary_url, wait_until='domcontentloaded', timeout=30000)
+                time.sleep(3)
 
             current_url = page.url
             print(f"Current URL: {current_url}")
+            page.screenshot(path='debug_diarywrite.png')
+
+            # 404チェック
+            page_text = page.text_content('body') or ''
+            if '404' in page_text or 'Not Found' in page_text:
+                print("ERROR: Diary write page returned 404!")
+                print("Trying alternative management URL...")
+                # 管理画面経由を試す
+                alt_urls = [
+                    f'https://plaza.rakuten.co.jp/{RAKUTEN_BLOG_ID}/bbs/write/',
+                    f'https://plaza.rakuten.co.jp/diarywrite/',
+                    'https://plaza.rakuten.co.jp/mypage/',
+                ]
+                for alt_url in alt_urls:
+                    page.goto(alt_url, wait_until='domcontentloaded', timeout=15000)
+                    time.sleep(2)
+                    alt_text = page.text_content('body') or ''
+                    if '404' not in alt_text and 'Not Found' not in alt_text:
+                        print(f"  Found working URL: {page.url}")
+                        page.screenshot(path='debug_alt_page.png')
+                        break
+                    print(f"  {alt_url} -> also failed")
+
+            current_url = page.url
+            print(f"Final working URL: {current_url}")
 
             # ============================================
             # Step 3: タイトル入力
