@@ -374,8 +374,8 @@ def post_to_rakuten_blog(image_path, title, content):
             # ============================================
             print("Step 1: Logging in to Rakuten...")
 
-            # 直接ログインページに行く
-            login_url = 'https://grp01.id.rakuten.co.jp/rms/nid/vc?__event=LOGIN&service_id=top&return_url=https%3A%2F%2Fplaza.rakuten.co.jp%2F' + RAKUTEN_BLOG_ID + '%2Fdiarywrite%2F'
+            # 日記作成ページに直接行く（ログインが必要ならリダイレクトされる）
+            login_url = 'https://my.plaza.rakuten.co.jp/diary/write/'
             page.goto(login_url, wait_until='domcontentloaded', timeout=30000)
             time.sleep(3)
 
@@ -437,9 +437,9 @@ def post_to_rakuten_blog(image_path, title, content):
             # ============================================
             print("Step 2: Navigating to diary write page...")
 
-            # すでにdiarywriteにいなければ移動
-            diary_url = f'https://plaza.rakuten.co.jp/{RAKUTEN_BLOG_ID}/diarywrite/'
-            if 'diarywrite' not in page.url:
+            # すでに日記作成ページにいなければ移動
+            diary_url = 'https://my.plaza.rakuten.co.jp/diary/write/'
+            if 'diary/write' not in page.url:
                 page.goto(diary_url, wait_until='domcontentloaded', timeout=30000)
                 time.sleep(3)
 
@@ -454,9 +454,8 @@ def post_to_rakuten_blog(image_path, title, content):
                 print("Trying alternative management URL...")
                 # 管理画面経由を試す
                 alt_urls = [
-                    f'https://plaza.rakuten.co.jp/{RAKUTEN_BLOG_ID}/bbs/write/',
-                    f'https://plaza.rakuten.co.jp/diarywrite/',
-                    'https://plaza.rakuten.co.jp/mypage/',
+                    'https://my.plaza.rakuten.co.jp/diary/write/',
+                    'https://my.plaza.rakuten.co.jp/',
                 ]
                 for alt_url in alt_urls:
                     page.goto(alt_url, wait_until='domcontentloaded', timeout=15000)
