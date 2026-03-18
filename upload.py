@@ -300,8 +300,8 @@ def sanitize_category(name, max_len=30):
     return name if name else "Muscle"
 
 
-def build_blog_content(tags, file_path):
-    """記事のタイトルと本文を生成"""
+def build_blog_html(image_url, tags, file_path):
+    """記事のタイトルとHTML本文を生成（TinyMCE直接挿入用）"""
     parts = file_path.replace('\\', '/').split('/')
     category = "Muscle"
     for p in parts:
@@ -321,44 +321,189 @@ def build_blog_content(tags, file_path):
 
     hashtag_text = ' '.join([f'#{t}' for t in tags[:15]])
 
-    # 楽天ブログはリッチエディタなので、改行は\nでOK
-    content = f"""{opening}
+    # HTML形式で本文を生成（TinyMCEに直接挿入する）
+    body_html = body.replace('\n', '<br>')
 
-{intro}
+    content_html = f'''<p>{opening}</p>
+<p>{intro}</p>
+<p>&nbsp;</p>
+<div style="text-align: center;">
+<img src="{image_url}" alt="{category}" style="max-width: 100%;" />
+</div>
+<p>&nbsp;</p>
+<p>{body_html}</p>
+<p>&nbsp;</p>
+<p>{closing}</p>
+<hr />
+<div style="text-align: center; background: #1a1a2e; padding: 20px; border-radius: 10px; margin: 20px 0;">
+<p style="font-size: 1.3em; color: #FFD700;">🔥 もっと見たい？ Patreonで限定コンテンツ公開中！</p>
+<p style="font-size: 1.1em;"><a href="{PATREON_LINK}" target="_blank" rel="noopener" style="color: #00C9FF; text-decoration: underline;">👉 MuscleLove on Patreon 👈</a></p>
+<p style="font-size: 0.9em; color: #ccc;">ここでしか見れない筋肉美をお届け中💪</p>
+</div>
+<p>&nbsp;</p>
+<p style="color: #888; font-size: 0.85em;">{hashtag_text}</p>'''
 
-（画像は上に挿入済み）
-
-{body}
-
-{closing}
-
-━━━━━━━━━━━━━━━━━━
-🔥 もっと見たい？ Patreonで限定コンテンツ公開中！
-👉 {PATREON_LINK}
-ここでしか見れない筋肉美をお届け中💪
-━━━━━━━━━━━━━━━━━━
-
-{hashtag_text}"""
-
-    return title, content
+    return title, content_html
 
 
 # ============================================================
 # Playwright: 楽天ブログに投稿
 # ============================================================
 
-def post_to_rakuten_blog(image_path, title, content):
-    """Playwrightで楽天ブログにログイン → 画像アップ → 記事投稿"""
+def _rakuten_login(page):
+    """楽天ログイン処理（共通）"""
+    if 'grp' in page.url or 'login' in page.url.lower() or 'nid' in page.url:
+        print("  Login required...")
+        try:
+            user_input = page.locator('input[type="text"]:visible, input[type="email"]:visible').first
+            user_input.fill(RAKUTEN_USER_ID)
+            print(f"  User ID filled: {RAKUTEN_USER_ID[:3]}***")
+            time.sleep(1)
+            page.locator('button:visible:has-text("次へ"), input[type="submit"]:visible').first.click()
+            print("  Next clicked")
+            time.sleep(3)
+        except Exception as e:
+            print(f"  User ID step: {e}")
+
+        try:
+            pass_input = page.locator('input[type="password"]:visible').first
+            pass_input.wait_for(state='visible', timeout=10000)
+            pass_input.fill(RAKUTEN_PASSWORD)
+            print("  Password filled")
+            time.sleep(1)
+            page.locator('button:visible:has-text("ログイン"), input[type="submit"]:visible').first.click()
+            print("  Login clicked")
+            time.sleep(5)
+        except Exception as e:
+            print(f"  Password step: {e}")
+
+        print(f"  After login: {page.url}")
+    else:
+        print("  Already logged in")
+
+
+def upload_image_to_rakuten(page, image_path):
+    """画像管理ページで画像をアップロードし、画像URLを返す"""
+    print(f"  Uploading: {os.path.basename(image_path)}")
+
+    # 画像管理ページへ
+    page.goto('https://my.plaza.rakuten.co.jp/image/list/',
+               wait_until='domcontentloaded', timeout=30000)
+    time.sleep(3)
+    _rakuten_login(page)
+    if 'image/list' not in page.url:
+        page.goto('https://my.plaza.rakuten.co.jp/image/list/',
+                   wait_until='domcontentloaded', timeout=30000)
+        time.sleep(3)
+
+    # アップロードボタンをクリック
+    try:
+        page.locator('a.imgListUpload').first.click()
+        time.sleep(3)
+        page.screenshot(path='debug_upload_modal.png')
+
+        # colorbox内のファイル入力を探す
+        file_input = page.locator('#cboxLoadedContent input[type="file"], input[type="file"]').first
+        if file_input.is_visible(timeout=5000):
+            file_input.set_input_files(image_path)
+            print("  File selected")
+            time.sleep(5)
+
+            # アップロード実行ボタン
+            for sel in ['button:has-text("アップロード")', 'input[value*="アップロード"]',
+                        'button:has-text("OK")', 'a:has-text("アップロード")']:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.is_visible(timeout=3000):
+                        btn.click()
+                        print(f"  Upload clicked: {sel}")
+                        time.sleep(5)
+                        break
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"  Upload modal approach failed: {e}")
+
+    # 画像一覧を再読み込みして最新の画像URLを取得
+    page.goto('https://my.plaza.rakuten.co.jp/image/list/',
+               wait_until='domcontentloaded', timeout=30000)
+    time.sleep(3)
+
+    image_urls = page.evaluate('''() => {
+        const urls = [];
+        document.querySelectorAll('img').forEach(img => {
+            const src = img.src || '';
+            if (src.includes('image.space.rakuten') && src.includes('/strg/')) {
+                urls.push(src);
+            }
+        });
+        return urls;
+    }''')
+
+    if not image_urls:
+        # HTMLから正規表現で探す
+        html = page.content()
+        image_urls = list(set(re.findall(
+            r'https://image\.space\.rakuten\.co\.jp/d/strg/ctrl/\d+/[a-f0-9]+\.\d+\.\d+\.\d+\.\d+\.\w+',
+            html
+        )))
+
+    if image_urls:
+        # 最新（最初の）画像URLを返す
+        url = image_urls[0]
+        print(f"  Image URL: {url[:60]}...")
+        return url
+    else:
+        print("  Warning: No image URLs found")
+        return None
+
+
+def get_existing_image_url(page):
+    """既存のアップロード済み画像からランダムに1つURLを取得"""
+    page.goto('https://my.plaza.rakuten.co.jp/image/list/',
+               wait_until='domcontentloaded', timeout=30000)
+    time.sleep(3)
+    _rakuten_login(page)
+    if 'image/list' not in page.url:
+        page.goto('https://my.plaza.rakuten.co.jp/image/list/',
+                   wait_until='domcontentloaded', timeout=30000)
+        time.sleep(3)
+
+    image_urls = page.evaluate('''() => {
+        const urls = [];
+        document.querySelectorAll('img').forEach(img => {
+            const src = img.src || '';
+            if (src.includes('image.space.rakuten') && src.includes('/strg/')) {
+                urls.push(src);
+            }
+        });
+        return urls;
+    }''')
+
+    if not image_urls:
+        html = page.content()
+        image_urls = list(set(re.findall(
+            r'https://image\.space\.rakuten\.co\.jp/d/strg/ctrl/\d+/[a-f0-9]+\.\d+\.\d+\.\d+\.\d+\.\w+',
+            html
+        )))
+
+    return image_urls
+
+
+def post_to_rakuten_blog(image_url, title, content_html):
+    """Playwrightで楽天ブログにログイン → 記事投稿
+    image_url: 楽天写真館の画像URL（既にアップロード済み）
+    content_html: 画像imgタグを含むHTML本文
+    """
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            viewport={'width': 1280, 'height': 800},
+            viewport={'width': 1280, 'height': 900},
         )
 
-        # Cookie保存用
         cookie_file = 'rakuten_cookies.json'
         if os.path.exists(cookie_file):
             with open(cookie_file, 'r') as f:
@@ -370,314 +515,116 @@ def post_to_rakuten_blog(image_path, title, content):
 
         try:
             # ============================================
-            # Step 1: まず楽天にログイン
+            # Step 1: 日記作成ページへ（ログイン含む）
             # ============================================
-            print("Step 1: Logging in to Rakuten...")
-
-            # 日記作成ページに直接行く（ログインが必要ならリダイレクトされる）
-            login_url = 'https://my.plaza.rakuten.co.jp/diary/write/'
-            page.goto(login_url, wait_until='domcontentloaded', timeout=30000)
+            print("Step 1: Navigating to diary write page...")
+            page.goto('https://my.plaza.rakuten.co.jp/diary/write/',
+                       wait_until='domcontentloaded', timeout=30000)
             time.sleep(3)
+            _rakuten_login(page)
 
-            print(f"Login page URL: {page.url}")
-            page.screenshot(path='debug_login.png')
-
-            # ログインページかチェック
-            if 'id.rakuten' in page.url or 'login' in page.url.lower() or 'nid' in page.url:
-                print("Login page detected (2-step login)...")
-
-                # ===== Step 1a: ユーザID入力 =====
-                try:
-                    # テキスト入力欄を探す（2ステップ式の最初の画面）
-                    user_input = page.locator('input[type="text"], input[type="email"], input[name="u"]').first
-                    user_input.fill(RAKUTEN_USER_ID)
-                    print(f"  User ID filled: {RAKUTEN_USER_ID[:3]}***")
-                    time.sleep(1)
-
-                    # 「次へ」ボタンをクリック
-                    next_btn = page.locator('button:has-text("次へ"), input[value*="次へ"], button[type="submit"]').first
-                    next_btn.click()
-                    print("  'Next' button clicked")
-                    time.sleep(3)
-                except Exception as e:
-                    print(f"  User ID step failed: {e}")
-
-                page.screenshot(path='debug_after_userid.png')
-                print(f"  After user ID URL: {page.url}")
-
-                # ===== Step 1b: パスワード入力 =====
-                try:
-                    # パスワード入力欄が表示されるのを待つ
-                    pass_input = page.locator('input[type="password"]').first
-                    pass_input.wait_for(state='visible', timeout=10000)
-                    pass_input.fill(RAKUTEN_PASSWORD)
-                    print("  Password filled")
-                    time.sleep(1)
-
-                    # ログインボタンをクリック
-                    login_btn = page.locator('button:has-text("ログイン"), input[value*="ログイン"], button[type="submit"]').first
-                    login_btn.click()
-                    print("  Login button clicked")
-                    time.sleep(5)
-                except Exception as e:
-                    print(f"  Password step failed: {e}")
-
-                print(f"After login URL: {page.url}")
-                page.screenshot(path='debug_after_login.png')
-            elif 'diary' in page.url and 'my.plaza' in page.url:
-                print("Already logged in!")
-            else:
-                print(f"Unexpected page: {page.url}")
-
-            # ============================================
-            # Step 2: 日記作成ページに移動
-            # ============================================
-            print("Step 2: Navigating to diary write page...")
-
-            # すでに日記作成ページにいなければ移動
-            diary_url = 'https://my.plaza.rakuten.co.jp/diary/write/'
             if 'diary/write' not in page.url:
-                page.goto(diary_url, wait_until='domcontentloaded', timeout=30000)
+                page.goto('https://my.plaza.rakuten.co.jp/diary/write/',
+                           wait_until='domcontentloaded', timeout=30000)
                 time.sleep(3)
 
-            current_url = page.url
-            print(f"Current URL: {current_url}")
+            page.locator('#diary_write_d_title').wait_for(state='visible', timeout=10000)
+            print(f"  Diary write page ready")
             page.screenshot(path='debug_diarywrite.png')
 
-            # 404チェック
-            page_text = page.text_content('body') or ''
-            if '404' in page_text or 'Not Found' in page_text:
-                print("ERROR: Diary write page returned 404!")
-                print("Trying alternative management URL...")
-                # 管理画面経由を試す
-                alt_urls = [
-                    'https://my.plaza.rakuten.co.jp/diary/write/',
-                    'https://my.plaza.rakuten.co.jp/',
-                ]
-                for alt_url in alt_urls:
-                    page.goto(alt_url, wait_until='domcontentloaded', timeout=15000)
-                    time.sleep(2)
-                    alt_text = page.text_content('body') or ''
-                    if '404' not in alt_text and 'Not Found' not in alt_text:
-                        print(f"  Found working URL: {page.url}")
-                        page.screenshot(path='debug_alt_page.png')
-                        break
-                    print(f"  {alt_url} -> also failed")
-
-            current_url = page.url
-            print(f"Final working URL: {current_url}")
+            # ============================================
+            # Step 2: タイトル入力
+            # ============================================
+            print(f"Step 2: Title: {title}")
+            page.locator('#diary_write_d_title').fill(title)
 
             # ============================================
-            # Step 3: タイトル入力
+            # Step 3: 本文入力（TinyMCEに直接HTML挿入）
             # ============================================
-            print(f"Step 3: Setting title: {title}")
+            print("Step 3: Inserting content into TinyMCE...")
 
-            # タイトルフィールドを探す
-            title_selectors = [
-                'input[name="title"]',
-                'input#title',
-                'input[name="diary_title"]',
-                'input.titleInput',
-                'input[placeholder*="タイトル"]',
-            ]
+            result = page.evaluate(f'''() => {{
+                const iframe = document.getElementById('diary_write_d_text_ifr');
+                if (iframe && iframe.contentDocument) {{
+                    iframe.contentDocument.body.innerHTML = {json.dumps(content_html)};
+                    return 'success';
+                }}
+                return 'iframe not found';
+            }}''')
+            print(f"  TinyMCE insert: {result}")
 
-            title_filled = False
-            for selector in title_selectors:
+            if result != 'success':
+                # フォールバック: frame_locator経由
                 try:
-                    el = page.locator(selector).first
-                    if el.is_visible(timeout=3000):
-                        el.fill(title)
-                        title_filled = True
-                        print(f"  Title filled via: {selector}")
-                        break
-                except Exception:
-                    continue
-
-            if not title_filled:
-                print("  Warning: Could not find title field, trying fallback...")
-                # フォールバック: 最初のtext inputを試す
-                try:
-                    page.locator('input[type="text"]').first.fill(title)
-                    title_filled = True
-                    print("  Title filled via fallback (first text input)")
+                    iframe = page.frame_locator('#diary_write_d_text_ifr')
+                    body_el = iframe.locator('body')
+                    body_el.wait_for(state='visible', timeout=5000)
+                    body_el.evaluate(f'(el) => {{ el.innerHTML = {json.dumps(content_html)}; }}')
+                    print("  Content filled via frame_locator fallback")
                 except Exception as e:
-                    print(f"  Title fill failed: {e}")
+                    print(f"  Fallback also failed: {e}")
+
+            page.screenshot(path='debug_content.png')
 
             # ============================================
-            # Step 4: 画像アップロード
+            # Step 4: 公開
             # ============================================
-            print(f"Step 4: Uploading image: {os.path.basename(image_path)}")
-
-            # 画像挿入ボタンを探してクリック
-            image_btn_selectors = [
-                'a[title*="画像"]',
-                'button[title*="画像"]',
-                'a:has-text("画像")',
-                'img[alt*="画像"]',
-                '.imageBtn',
-                'a[href*="image"]',
-            ]
-
-            image_btn_clicked = False
-            for selector in image_btn_selectors:
-                try:
-                    el = page.locator(selector).first
-                    if el.is_visible(timeout=3000):
-                        el.click()
-                        image_btn_clicked = True
-                        print(f"  Image button clicked: {selector}")
-                        time.sleep(3)
-                        break
-                except Exception:
-                    continue
-
-            if image_btn_clicked:
-                # ファイル入力を探してアップロード
-                try:
-                    file_input = page.locator('input[type="file"]').first
-                    file_input.set_input_files(image_path)
-                    print("  Image file selected")
-                    time.sleep(5)
-
-                    # アップロード/挿入ボタンを探してクリック
-                    upload_selectors = [
-                        'button:has-text("挿入")',
-                        'button:has-text("アップロード")',
-                        'input[value*="挿入"]',
-                        'input[value*="アップロード"]',
-                        'button:has-text("OK")',
-                        'a:has-text("挿入")',
-                    ]
-                    for sel in upload_selectors:
-                        try:
-                            btn = page.locator(sel).first
-                            if btn.is_visible(timeout=3000):
-                                btn.click()
-                                print(f"  Upload/Insert clicked: {sel}")
-                                time.sleep(3)
-                                break
-                        except Exception:
-                            continue
-                except Exception as e:
-                    print(f"  Image upload via button failed: {e}")
-            else:
-                # フォールバック: 直接file inputを探す
-                print("  Image button not found, trying direct file input...")
-                try:
-                    file_input = page.locator('input[type="file"]').first
-                    file_input.set_input_files(image_path)
-                    print("  Image file selected (direct)")
-                    time.sleep(5)
-                except Exception as e:
-                    print(f"  Direct file input failed: {e}")
-                    print("  Continuing without image...")
-
-            # ============================================
-            # Step 5: 本文入力
-            # ============================================
-            print("Step 5: Entering content...")
-
-            # リッチエディタ（iframe内）またはtextareaに本文を入力
-            content_filled = False
-
-            # パターン1: iframe内のリッチエディタ
-            try:
-                frames = page.frames
-                for frame in frames:
-                    try:
-                        body_el = frame.locator('body[contenteditable="true"], body.mceContentBody').first
-                        if body_el.is_visible(timeout=2000):
-                            # 既存コンテンツの後に追加（画像が挿入されてる可能性）
-                            existing = body_el.inner_html()
-                            body_el.evaluate(f'(el) => {{ el.innerHTML = el.innerHTML + "<br><br>" + {json.dumps(content.replace(chr(10), "<br>"))}; }}')
-                            content_filled = True
-                            print("  Content filled via iframe rich editor")
-                            break
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-
-            # パターン2: textarea
-            if not content_filled:
-                textarea_selectors = [
-                    'textarea[name="diary_body"]',
-                    'textarea[name="body"]',
-                    'textarea#body',
-                    'textarea.bodyTextarea',
-                    'textarea',
-                ]
-                for selector in textarea_selectors:
-                    try:
-                        el = page.locator(selector).first
-                        if el.is_visible(timeout=3000):
-                            el.fill(content)
-                            content_filled = True
-                            print(f"  Content filled via: {selector}")
-                            break
-                    except Exception:
-                        continue
-
-            if not content_filled:
-                print("  Warning: Could not fill content body")
-
-            # ============================================
-            # Step 6: 投稿（公開）
-            # ============================================
-            print("Step 6: Publishing...")
+            print("Step 4: Publishing...")
             time.sleep(2)
 
-            publish_selectors = [
-                'input[value*="公開"]',
-                'button:has-text("公開")',
-                'input[value*="投稿"]',
-                'button:has-text("投稿")',
-                'input[name="publish"]',
-                'input[type="submit"][value*="日記"]',
-                'button[type="submit"]',
-            ]
+            try:
+                publish_btn = page.locator('#diary_write_public_submit')
+                publish_btn.wait_for(state='visible', timeout=5000)
+                publish_btn.click()
+                print("  Publish button clicked")
+                time.sleep(3)
 
-            published = False
-            for selector in publish_selectors:
+                # 確認ダイアログの「公開する」をクリック（プロ活広告の確認）
                 try:
-                    btn = page.locator(selector).first
-                    if btn.is_visible(timeout=3000):
-                        btn.click()
-                        published = True
-                        print(f"  Publish clicked: {selector}")
-                        time.sleep(5)
-                        break
+                    confirm_btns = page.locator('a:visible:has-text("公開する"), button:visible:has-text("公開する")').all()
+                    for btn in confirm_btns:
+                        btn_id = btn.get_attribute('id') or ''
+                        if btn_id != 'diary_write_public_submit':
+                            btn.click()
+                            print("  Confirmation dialog: clicked '公開する'")
+                            break
                 except Exception:
-                    continue
+                    pass
 
-            if not published:
-                print("  Warning: Could not find publish button")
-                # スクリーンショットを保存してデバッグ用
-                page.screenshot(path='debug_publish.png')
-                print("  Debug screenshot saved: debug_publish.png")
+                time.sleep(5)
+                published = True
+            except Exception as e:
+                print(f"  Publish failed: {e}")
+                published = False
+                page.screenshot(path='debug_publish_error.png')
 
             # ============================================
-            # Step 7: 結果確認
+            # Step 5: 結果確認
             # ============================================
             final_url = page.url
-            print(f"Final URL: {final_url}")
+            print(f"  Final URL: {final_url}")
+            page.screenshot(path='debug_final.png')
 
-            # 投稿成功の判定
-            if 'diary' in final_url and 'write' not in final_url:
-                print("Post appears successful!")
+            # 公開完了ページのテキストで判定
+            page_text = page.evaluate('() => document.body.innerText.substring(0, 500)')
+            if '公開しました' in page_text:
+                print("  Post successful!")
+                article_url = final_url
+            elif published and 'write' not in final_url:
+                print("  Post appears successful")
                 article_url = final_url
             elif published:
-                print("Post submitted (checking result...)")
+                print("  Post submitted (result unclear)")
                 article_url = final_url
             else:
-                print("Post may have failed")
+                print("  Post may have failed")
                 article_url = None
 
-            # Cookie保存（次回ログイン省略用）
+            # Cookie保存
             cookies = context.cookies()
             with open(cookie_file, 'w') as f:
                 json.dump(cookies, f)
-            print("Cookies saved for next run")
+            print("  Cookies saved")
 
             return article_url
 
@@ -685,7 +632,6 @@ def post_to_rakuten_blog(image_path, title, content):
             print(f"Playwright error: {e}")
             try:
                 page.screenshot(path='debug_error.png')
-                print("Debug screenshot saved: debug_error.png")
             except Exception:
                 pass
             return None
@@ -701,40 +647,61 @@ def post_to_rakuten_blog(image_path, title, content):
 def main():
     print("=== Rakuten Blog Auto Poster (GitHub Actions) ===\n")
 
-    if not all([RAKUTEN_USER_ID, RAKUTEN_PASSWORD, RAKUTEN_BLOG_ID, GDRIVE_FOLDER_ID]):
+    if not all([RAKUTEN_USER_ID, RAKUTEN_PASSWORD, RAKUTEN_BLOG_ID]):
         print("Error: Missing required environment variables")
-        print("Required: RAKUTEN_USER_ID, RAKUTEN_PASSWORD, RAKUTEN_BLOG_ID, GDRIVE_FOLDER_ID")
+        print("Required: RAKUTEN_USER_ID, RAKUTEN_PASSWORD, RAKUTEN_BLOG_ID")
         return 1
 
     # Load log
     log_data = load_uploaded_log()
 
-    # Download media from Google Drive
-    media_files = download_media()
-    if not media_files:
-        print("No JPEG files found! (Rakuten Blog only supports JPEG)")
-        return 0
+    # ============================================
+    # Step 1: 画像URL取得（既存の楽天写真館画像を使用）
+    # ============================================
+    from playwright.sync_api import sync_playwright
 
-    # Filter out already uploaded
-    if os.environ.get("UPLOAD_ALL", "").lower() in ("1", "true", "yes"):
-        available = media_files
-        print(f"\nUPLOAD_ALL enabled: all {len(available)} files are candidates")
-    else:
-        uploaded_names = [entry['file'] if isinstance(entry, dict) else entry
-                          for entry in log_data.get("files", [])]
-        available = [f for f in media_files if os.path.basename(f) not in uploaded_names]
-        if not available:
-            print("All files already uploaded!")
-            return 0
-        print(f"\nAvailable: {len(available)} / Total: {len(media_files)}")
+    print("Step 1: Getting image URL from Rakuten image library...")
 
-    # Select random file
-    selected = random.choice(available)
-    fname = os.path.basename(selected)
-    print(f"Selected: {fname}")
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            viewport={'width': 1280, 'height': 900},
+        )
+        cookie_file = 'rakuten_cookies.json'
+        if os.path.exists(cookie_file):
+            with open(cookie_file, 'r') as f:
+                ctx.add_cookies(json.load(f))
 
-    # Generate tags
-    tags = generate_tags(selected)
+        tmp_page = ctx.new_page()
+        image_urls = get_existing_image_url(tmp_page)
+
+        # Cookie保存
+        cookies = ctx.cookies()
+        with open(cookie_file, 'w') as f:
+            json.dump(cookies, f)
+
+        browser.close()
+
+    if not image_urls:
+        print("No images found in Rakuten image library!")
+        return 1
+
+    # 既に使った画像URLを除外
+    used_urls = {entry.get('image_url', '') for entry in log_data.get("files", []) if isinstance(entry, dict)}
+    available_urls = [u for u in image_urls if u not in used_urls]
+    if not available_urls:
+        print("All images already used! Recycling...")
+        available_urls = image_urls
+
+    image_url = random.choice(available_urls)
+    print(f"Selected image: {image_url[:60]}...")
+    print(f"Available: {len(available_urls)} / Total: {len(image_urls)}")
+
+    # ============================================
+    # Step 2: タグ・記事生成
+    # ============================================
+    tags = list(BASE_HASHTAGS)
 
     # トレンドタグ
     try:
@@ -749,29 +716,32 @@ def main():
     except Exception as e:
         print(f"Trend tags skipped: {e}")
 
-    # 記事生成
-    title, content = build_blog_content(tags, selected)
+    # 記事HTML生成（画像URL埋め込み済み）
+    title, content_html = build_blog_html(image_url, tags, image_url)
     print(f"Title: {title}")
-    print(f"Content preview: {content[:100]}...")
+    print(f"Content length: {len(content_html)} chars")
 
-    # Playwrightで投稿
-    article_url = post_to_rakuten_blog(selected, title, content)
+    # ============================================
+    # Step 3: 投稿
+    # ============================================
+    article_url = post_to_rakuten_blog(image_url, title, content_html)
 
     if not article_url:
         print("Post may have failed!")
         return 1
 
-    # Record uploaded file
+    # Record
     log_data["files"].append({
-        'file': fname,
+        'file': os.path.basename(image_url),
+        'image_url': image_url,
         'article_url': article_url,
         'title': title,
         'uploaded_at': time.strftime('%Y-%m-%d %H:%M:%S'),
     })
     save_uploaded_log(log_data)
 
-    remaining = len(available) - 1
-    print(f"\nDone! Remaining: {remaining}")
+    remaining = len(available_urls) - 1
+    print(f"\nDone! Remaining images: {remaining}")
     return 0
 
 
