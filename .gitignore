@@ -1,9 +1,10 @@
-media/
-uploaded.json
 rakuten_cookies.json
-debug_*.png
-debug_output/
 __pycache__/
-*.pyc
 .env
-test_*.py
+images/
+test_*
+debug_*
+*.png
+media/
+*.pyc
+debug_output/
