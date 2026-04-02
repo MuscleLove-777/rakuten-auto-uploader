@@ -9,6 +9,14 @@ import sys, json, os, random, time, re
 import requests
 import gdown
 
+
+def safe_screenshot(page, path, timeout=10000):
+    """Take a debug screenshot, ignoring errors so it never breaks the main flow."""
+    try:
+        page.screenshot(path=path, timeout=timeout)
+    except Exception as e:
+        print(f"  (screenshot skipped: {e})")
+
 # ============================================================
 # 設定
 # ============================================================
@@ -400,7 +408,7 @@ def upload_image_to_rakuten(page, image_path):
     try:
         page.locator('a.imgListUpload').first.click()
         time.sleep(3)
-        page.screenshot(path='debug_upload_modal.png')
+        safe_screenshot(page, 'debug_upload_modal.png')
 
         # colorbox内のファイル入力を探す
         file_input = page.locator('#cboxLoadedContent input[type="file"], input[type="file"]').first
@@ -530,7 +538,7 @@ def post_to_rakuten_blog(image_url, title, content_html):
 
             page.locator('#diary_write_d_title').wait_for(state='visible', timeout=10000)
             print(f"  Diary write page ready")
-            page.screenshot(path='debug_diarywrite.png')
+            safe_screenshot(page, 'debug_diarywrite.png')
 
             # ============================================
             # Step 2: タイトル入力
@@ -564,7 +572,7 @@ def post_to_rakuten_blog(image_url, title, content_html):
                 except Exception as e:
                     print(f"  Fallback also failed: {e}")
 
-            page.screenshot(path='debug_content.png')
+            safe_screenshot(page, 'debug_content.png')
 
             # ============================================
             # Step 4: 公開
@@ -596,14 +604,14 @@ def post_to_rakuten_blog(image_url, title, content_html):
             except Exception as e:
                 print(f"  Publish failed: {e}")
                 published = False
-                page.screenshot(path='debug_publish_error.png')
+                safe_screenshot(page, 'debug_publish_error.png')
 
             # ============================================
             # Step 5: 結果確認
             # ============================================
             final_url = page.url
             print(f"  Final URL: {final_url}")
-            page.screenshot(path='debug_final.png')
+            safe_screenshot(page, 'debug_final.png')
 
             # 公開完了ページのテキストで判定
             page_text = page.evaluate('() => document.body.innerText.substring(0, 500)')
@@ -631,7 +639,7 @@ def post_to_rakuten_blog(image_url, title, content_html):
         except Exception as e:
             print(f"Playwright error: {e}")
             try:
-                page.screenshot(path='debug_error.png')
+                safe_screenshot(page, 'debug_error.png')
             except Exception:
                 pass
             return None
