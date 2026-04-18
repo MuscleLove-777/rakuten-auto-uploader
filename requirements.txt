@@ -1,4 +1,4 @@
 requests
-gdown
+gdown<6
 pytrends
 playwright
