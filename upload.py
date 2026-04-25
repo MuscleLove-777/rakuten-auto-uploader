@@ -26,10 +26,39 @@ RAKUTEN_USER_ID = os.environ.get("RAKUTEN_USER_ID", "")
 RAKUTEN_PASSWORD = os.environ.get("RAKUTEN_PASSWORD", "")
 RAKUTEN_BLOG_ID = os.environ.get("RAKUTEN_BLOG_ID", "")  # plaza.rakuten.co.jp/{BLOG_ID}/
 
-PATREON_LINK = "https://www.patreon.com/cw/MuscleLove"
+PATREON_LINK = "https://www.patreon.com/cw/MuscleLove?utm_source=rakuten"
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg'}  # 楽天写真館はJPEGのみ
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 楽天写真館上限: 20MB
 UPLOADED_LOG = "uploaded.json"
+
+# --- MuscleLove バックリンクプール（フィットネス系のみ。一般プラットフォーム配慮） ---
+ML_BACKLINK_POOL_FITNESS = [
+    ("https://musclelove-777.github.io/muscle-meal-girls/", "筋肉女子のマッスルメシ"),
+    ("https://musclelove-777.github.io/runners-lab/", "ランナーラボ"),
+    ("https://musclelove-777.github.io/armwrestling-girls-navi/", "腕相撲女子ナビ"),
+    ("https://musclelove-777.github.io/physique-girls-navi/", "フィジーク女子ナビ"),
+    ("https://musclelove-777.github.io/fighting-girls-navi/", "格闘技女子ナビ"),
+    ("https://musclelove-777.github.io/joshi-prowrestling-navi/", "女子プロレスナビ"),
+    ("https://musclelove-777.github.io/female-physique-queens/", "Female Physique Queens"),
+    ("https://musclelove-777.github.io/network/fitness/", "全Fitness Network 15サイト一覧"),
+    ("https://musclelove-777.github.io/network/academy/", "MuscleLove Academy 77サイト"),
+]
+
+
+def build_backlink_block():
+    """MuscleLoveフィットネス系サイトへのバックリンクHTMLブロック（ランダム3件、冪等マーカー付き）"""
+    try:
+        k = min(3, len(ML_BACKLINK_POOL_FITNESS))
+        selected = random.sample(ML_BACKLINK_POOL_FITNESS, k=k)
+        items = " | ".join([f'<a href="{u}" target="_blank" rel="noopener">{n}</a>' for u, n in selected])
+        return (
+            "\n<br/><br/>\n"
+            "<!-- ML_BACKLINK -->\n"
+            f'<small style="color:#888;">💡 関連サイト：{items}</small>\n'
+            "<!-- /ML_BACKLINK -->\n"
+        )
+    except Exception:
+        return ""
 
 # ============================================================
 # 記事タイトルテンプレート（人気ブログ風）
@@ -351,6 +380,7 @@ def build_blog_html(image_url, tags, file_path):
 <p>&nbsp;</p>
 <p style="color: #888; font-size: 0.85em;">{hashtag_text}</p>'''
 
+    content_html = content_html.rstrip() + build_backlink_block()
     return title, content_html
 
 
