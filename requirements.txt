@@ -2,3 +2,4 @@ requests
 gdown<6
 pytrends
 playwright
+Pillow

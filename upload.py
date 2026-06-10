@@ -4,7 +4,8 @@
 Google Driveからダウンロード → ランダム1ファイル → Playwrightで楽天ブログに投稿
 ※ 楽天ブログにはAPIがないため、ブラウザ自動操作で投稿する
 """
-import sys, json, os, random, time, re
+import sys, json, os, random, time, re, shutil
+from pathlib import Path
 
 import requests
 import gdown
@@ -27,9 +28,11 @@ RAKUTEN_PASSWORD = os.environ.get("RAKUTEN_PASSWORD", "")
 RAKUTEN_BLOG_ID = os.environ.get("RAKUTEN_BLOG_ID", "")  # plaza.rakuten.co.jp/{BLOG_ID}/
 
 PATREON_LINK = "https://www.patreon.com/cw/MuscleLove?utm_source=rakuten"
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg'}  # 楽天写真館はJPEGのみ
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'}
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 楽天写真館上限: 20MB
 UPLOADED_LOG = "uploaded.json"
+MEDIA_DIR = Path("media")
+PREPARED_DIR = Path("prepared_media")
 
 # --- MuscleLove バックリンクプール（フィットネス系のみ。一般プラットフォーム配慮） ---
 ML_BACKLINK_POOL_FITNESS = [
@@ -276,32 +279,96 @@ def save_uploaded_log(log_data):
         json.dump(log_data, f, indent=2, ensure_ascii=False)
 
 
+def used_source_keys(log_data):
+    used = set()
+    for entry in log_data.get("files", []):
+        if not isinstance(entry, dict):
+            continue
+        for key in ("source_key", "source_name", "file"):
+            value = entry.get(key)
+            if value:
+                used.add(str(value))
+    return used
+
+
 # ============================================================
 # Google Driveダウンロード
 # ============================================================
 
 def download_media():
-    dl_dir = "media"
-    os.makedirs(dl_dir, exist_ok=True)
+    if MEDIA_DIR.exists():
+        shutil.rmtree(MEDIA_DIR)
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     url = f"https://drive.google.com/drive/folders/{GDRIVE_FOLDER_ID}"
     print(f"Downloading from Google Drive: {url}")
     try:
-        gdown.download_folder(url, output=dl_dir, quiet=False, remaining_ok=True)
+        gdown.download_folder(url, output=str(MEDIA_DIR), quiet=False, remaining_ok=True, use_cookies=False)
+    except TypeError:
+        gdown.download_folder(url, output=str(MEDIA_DIR), quiet=False, remaining_ok=True)
     except Exception as e:
         print(f"Download error: {e}")
 
     files = []
-    for root, dirs, filenames in os.walk(dl_dir):
+    for root, dirs, filenames in os.walk(MEDIA_DIR):
         for fname in filenames:
             fpath = os.path.join(root, fname)
             ext = os.path.splitext(fname)[1].lower()
             if ext in IMAGE_EXTENSIONS:
                 size = os.path.getsize(fpath)
                 if size <= MAX_FILE_SIZE:
-                    files.append(fpath)
+                    source_key = Path(fpath).relative_to(MEDIA_DIR).as_posix()
+                    files.append({
+                        "path": fpath,
+                        "source_key": source_key,
+                        "source_name": fname,
+                    })
                 else:
                     print(f"Skip (>20MB): {fname} ({size / 1024 / 1024:.1f}MB)")
     return files
+
+
+def select_media(media_files, log_data):
+    """未使用素材からランダム選択。全消化済みなら全体からリサイクル。"""
+    if not media_files:
+        return None, []
+
+    used = used_source_keys(log_data)
+    available = [
+        item for item in media_files
+        if item["source_key"] not in used and item["source_name"] not in used
+    ]
+    if not available:
+        print("All Drive images already used. Recycling full pool.")
+        available = list(media_files)
+
+    rng = random.SystemRandom()
+    rng.shuffle(available)
+    selected = rng.choice(available)
+    return selected, available
+
+
+def prepare_image_for_rakuten(image_path):
+    """楽天写真館向けにJPEGへ正規化し、20MB未満に収める。"""
+    from PIL import Image
+
+    PREPARED_DIR.mkdir(parents=True, exist_ok=True)
+    src = Path(image_path)
+    out = PREPARED_DIR / f"{src.stem}_rakuten.jpg"
+
+    with Image.open(src) as img:
+        img = img.convert("RGB")
+        # 楽天側の失敗を避けるため、長辺をやや抑えてJPEG化する
+        img.thumbnail((1800, 2400), Image.Resampling.LANCZOS)
+
+        quality = 92
+        while quality >= 72:
+            img.save(out, format="JPEG", quality=quality, optimize=True)
+            if out.stat().st_size <= MAX_FILE_SIZE:
+                print(f"Prepared JPEG: {out} ({out.stat().st_size / 1024 / 1024:.1f}MB, q={quality})")
+                return str(out)
+            quality -= 5
+
+    raise RuntimeError(f"Prepared image is still too large: {out}")
 
 
 # ============================================================
@@ -388,6 +455,10 @@ def build_blog_html(image_url, tags, file_path):
 # Playwright: 楽天ブログに投稿
 # ============================================================
 
+RAKUTEN_IMAGE_RE = re.compile(
+    r'https://image\.space\.rakuten\.co\.jp/d/strg/ctrl/\d+/[a-f0-9]+\.\d+\.\d+\.\d+\.\d+\.\w+'
+)
+
 def _rakuten_login(page):
     """楽天ログイン処理（共通）"""
     if 'grp' in page.url or 'login' in page.url.lower() or 'nid' in page.url:
@@ -420,6 +491,44 @@ def _rakuten_login(page):
         print("  Already logged in")
 
 
+def collect_rakuten_image_urls(page):
+    """楽天写真館ページ内の画像URLを重複なし・表示順で取得する。"""
+    urls = page.evaluate('''() => {
+        const found = [];
+        const push = (value) => {
+            if (!value) return;
+            if (value.includes('image.space.rakuten') && value.includes('/strg/')) {
+                found.push(value);
+            }
+        };
+        document.querySelectorAll('img').forEach(img => {
+            push(img.currentSrc || img.src || img.getAttribute('src'));
+        });
+        document.querySelectorAll('a[href], input[value], textarea').forEach(el => {
+            push(el.getAttribute('href'));
+            push(el.getAttribute('value'));
+            push(el.value);
+            push(el.textContent);
+        });
+        return found;
+    }''')
+
+    html = page.content()
+    urls.extend(RAKUTEN_IMAGE_RE.findall(html))
+
+    unique = []
+    seen = set()
+    for url in urls:
+        if not url:
+            continue
+        clean = str(url).strip()
+        if clean in seen:
+            continue
+        seen.add(clean)
+        unique.append(clean)
+    return unique
+
+
 def upload_image_to_rakuten(page, image_path):
     """画像管理ページで画像をアップロードし、画像URLを返す"""
     print(f"  Uploading: {os.path.basename(image_path)}")
@@ -434,62 +543,67 @@ def upload_image_to_rakuten(page, image_path):
                    wait_until='domcontentloaded', timeout=30000)
         time.sleep(3)
 
+    before_urls = set(collect_rakuten_image_urls(page))
+    print(f"  Existing Rakuten images before upload: {len(before_urls)}")
+
     # アップロードボタンをクリック
+    uploaded_clicked = False
     try:
         page.locator('a.imgListUpload').first.click()
         time.sleep(3)
         safe_screenshot(page, 'debug_upload_modal.png')
 
-        # colorbox内のファイル入力を探す
+        # colorbox内のファイル入力を探す。非表示inputでもDOMにあればset_input_filesできる。
         file_input = page.locator('#cboxLoadedContent input[type="file"], input[type="file"]').first
-        if file_input.is_visible(timeout=5000):
-            file_input.set_input_files(image_path)
-            print("  File selected")
-            time.sleep(5)
+        file_input.wait_for(state='attached', timeout=10000)
+        file_input.set_input_files(image_path)
+        print("  File selected")
+        time.sleep(3)
 
-            # アップロード実行ボタン
-            for sel in ['button:has-text("アップロード")', 'input[value*="アップロード"]',
-                        'button:has-text("OK")', 'a:has-text("アップロード")']:
-                try:
-                    btn = page.locator(sel).first
-                    if btn.is_visible(timeout=3000):
-                        btn.click()
-                        print(f"  Upload clicked: {sel}")
-                        time.sleep(5)
-                        break
-                except Exception:
-                    continue
+        # アップロード実行ボタン
+        for sel in ['button:has-text("アップロード")', 'input[value*="アップロード"]',
+                    'button:has-text("OK")', 'a:has-text("アップロード")']:
+            try:
+                btn = page.locator(sel).first
+                if btn.is_visible(timeout=3000):
+                    btn.click()
+                    print(f"  Upload clicked: {sel}")
+                    uploaded_clicked = True
+                    time.sleep(8)
+                    break
+            except Exception:
+                continue
     except Exception as e:
         print(f"  Upload modal approach failed: {e}")
+
+    if not uploaded_clicked:
+        print("  Warning: upload submit button was not confirmed")
+        try:
+            file_input = page.locator('input[type="file"]').first
+            file_input.wait_for(state='attached', timeout=5000)
+            file_input.set_input_files(image_path)
+            print("  Fallback file selected")
+            page.keyboard.press("Enter")
+            time.sleep(8)
+        except Exception as e:
+            print(f"  Fallback upload failed: {e}")
 
     # 画像一覧を再読み込みして最新の画像URLを取得
     page.goto('https://my.plaza.rakuten.co.jp/image/list/',
                wait_until='domcontentloaded', timeout=30000)
-    time.sleep(3)
+    time.sleep(5)
 
-    image_urls = page.evaluate('''() => {
-        const urls = [];
-        document.querySelectorAll('img').forEach(img => {
-            const src = img.src || '';
-            if (src.includes('image.space.rakuten') && src.includes('/strg/')) {
-                urls.push(src);
-            }
-        });
-        return urls;
-    }''')
+    image_urls = collect_rakuten_image_urls(page)
+    new_urls = [u for u in image_urls if u not in before_urls]
 
-    if not image_urls:
-        # HTMLから正規表現で探す
-        html = page.content()
-        image_urls = list(set(re.findall(
-            r'https://image\.space\.rakuten\.co\.jp/d/strg/ctrl/\d+/[a-f0-9]+\.\d+\.\d+\.\d+\.\d+\.\w+',
-            html
-        )))
-
-    if image_urls:
-        # 最新（最初の）画像URLを返す
+    if new_urls:
+        url = new_urls[0]
+        print(f"  New image URL: {url[:80]}...")
+        return url
+    elif image_urls:
+        # 楽天側の一覧DOMが差分を出さない場合の保険。重複投稿を避けるためメイン側でログ管理する。
         url = image_urls[0]
-        print(f"  Image URL: {url[:60]}...")
+        print(f"  Warning: no new URL detected; fallback to first listed image: {url[:80]}...")
         return url
     else:
         print("  Warning: No image URLs found")
@@ -507,25 +621,7 @@ def get_existing_image_url(page):
                    wait_until='domcontentloaded', timeout=30000)
         time.sleep(3)
 
-    image_urls = page.evaluate('''() => {
-        const urls = [];
-        document.querySelectorAll('img').forEach(img => {
-            const src = img.src || '';
-            if (src.includes('image.space.rakuten') && src.includes('/strg/')) {
-                urls.push(src);
-            }
-        });
-        return urls;
-    }''')
-
-    if not image_urls:
-        html = page.content()
-        image_urls = list(set(re.findall(
-            r'https://image\.space\.rakuten\.co\.jp/d/strg/ctrl/\d+/[a-f0-9]+\.\d+\.\d+\.\d+\.\d+\.\w+',
-            html
-        )))
-
-    return image_urls
+    return collect_rakuten_image_urls(page)
 
 
 def post_to_rakuten_blog(image_url, title, content_html):
@@ -581,17 +677,33 @@ def post_to_rakuten_blog(image_url, title, content_html):
             # ============================================
             print("Step 3: Inserting content into TinyMCE...")
 
-            result = page.evaluate(f'''() => {{
+            result = page.evaluate('''(html) => {
+                const editor = window.tinymce && window.tinymce.get && window.tinymce.get('diary_write_d_text');
+                if (editor) {
+                    editor.setContent(html);
+                    editor.save();
+                    editor.fire('change');
+                    return 'success:tinymce';
+                }
+
                 const iframe = document.getElementById('diary_write_d_text_ifr');
-                if (iframe && iframe.contentDocument) {{
-                    iframe.contentDocument.body.innerHTML = {json.dumps(content_html)};
-                    return 'success';
-                }}
+                if (iframe && iframe.contentDocument) {
+                    iframe.contentDocument.body.innerHTML = html;
+                    iframe.contentDocument.body.dispatchEvent(new Event('input', {bubbles: true}));
+                    iframe.contentDocument.body.dispatchEvent(new Event('change', {bubbles: true}));
+                    const textarea = document.getElementById('diary_write_d_text');
+                    if (textarea) {
+                        textarea.value = html;
+                        textarea.dispatchEvent(new Event('input', {bubbles: true}));
+                        textarea.dispatchEvent(new Event('change', {bubbles: true}));
+                    }
+                    return 'success:iframe';
+                }
                 return 'iframe not found';
-            }}''')
+            }''', content_html)
             print(f"  TinyMCE insert: {result}")
 
-            if result != 'success':
+            if not str(result).startswith('success'):
                 # フォールバック: frame_locator経由
                 try:
                     iframe = page.frame_locator('#diary_write_d_text_ifr')
@@ -603,6 +715,21 @@ def post_to_rakuten_blog(image_url, title, content_html):
                     print(f"  Fallback also failed: {e}")
 
             safe_screenshot(page, 'debug_content.png')
+
+            inserted_html = page.evaluate('''() => {
+                const editor = window.tinymce && window.tinymce.get && window.tinymce.get('diary_write_d_text');
+                if (editor) return editor.getContent();
+                const iframe = document.getElementById('diary_write_d_text_ifr');
+                if (iframe && iframe.contentDocument) return iframe.contentDocument.body.innerHTML;
+                const textarea = document.getElementById('diary_write_d_text');
+                return textarea ? textarea.value : '';
+            }''')
+            if image_url not in inserted_html:
+                print("  Error: image URL was not inserted into the editor. Aborting before publish.")
+                print(f"  Expected image URL: {image_url}")
+                safe_screenshot(page, 'debug_content_missing_image.png')
+                return None
+            print("  Content verification: image URL is present")
 
             # ============================================
             # Step 4: 公開
@@ -652,8 +779,8 @@ def post_to_rakuten_blog(image_url, title, content_html):
                 print("  Post appears successful")
                 article_url = final_url
             elif published:
-                print("  Post submitted (result unclear)")
-                article_url = final_url
+                print("  Post submitted, but result is unclear and still on write page")
+                article_url = None
             else:
                 print("  Post may have failed")
                 article_url = None
@@ -685,20 +812,40 @@ def post_to_rakuten_blog(image_url, title, content_html):
 def main():
     print("=== Rakuten Blog Auto Poster (GitHub Actions) ===\n")
 
-    if not all([RAKUTEN_USER_ID, RAKUTEN_PASSWORD, RAKUTEN_BLOG_ID]):
+    if not all([RAKUTEN_USER_ID, RAKUTEN_PASSWORD, RAKUTEN_BLOG_ID, GDRIVE_FOLDER_ID]):
         print("Error: Missing required environment variables")
-        print("Required: RAKUTEN_USER_ID, RAKUTEN_PASSWORD, RAKUTEN_BLOG_ID")
+        print("Required: RAKUTEN_USER_ID, RAKUTEN_PASSWORD, RAKUTEN_BLOG_ID, GDRIVE_FOLDER_ID")
         return 1
 
     # Load log
     log_data = load_uploaded_log()
 
     # ============================================
-    # Step 1: 画像URL取得（既存の楽天写真館画像を使用）
+    # Step 1: Drive素材をランダム選択 → 楽天写真館へ新規アップロード
     # ============================================
     from playwright.sync_api import sync_playwright
 
-    print("Step 1: Getting image URL from Rakuten image library...")
+    print("Step 1: Downloading Drive images and selecting a random unused file...")
+    media_files = download_media()
+    if not media_files:
+        print("No images found in Google Drive folder!")
+        return 1
+
+    selected_media, available_media = select_media(media_files, log_data)
+    if not selected_media:
+        print("No selectable images found!")
+        return 1
+
+    print(f"Selected Drive image: {selected_media['source_key']}")
+    print(f"Available: {len(available_media)} / Total: {len(media_files)}")
+
+    try:
+        prepared_image = prepare_image_for_rakuten(selected_media["path"])
+    except Exception as e:
+        print(f"Image preparation failed: {e}")
+        return 1
+
+    print("\nStep 2: Uploading selected image to Rakuten image library...")
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -712,7 +859,7 @@ def main():
                 ctx.add_cookies(json.load(f))
 
         tmp_page = ctx.new_page()
-        image_urls = get_existing_image_url(tmp_page)
+        image_url = upload_image_to_rakuten(tmp_page, prepared_image)
 
         # Cookie保存
         cookies = ctx.cookies()
@@ -721,25 +868,16 @@ def main():
 
         browser.close()
 
-    if not image_urls:
-        print("No images found in Rakuten image library!")
+    if not image_url:
+        print("Rakuten image upload failed; aborting before blog publish.")
         return 1
 
-    # 既に使った画像URLを除外
-    used_urls = {entry.get('image_url', '') for entry in log_data.get("files", []) if isinstance(entry, dict)}
-    available_urls = [u for u in image_urls if u not in used_urls]
-    if not available_urls:
-        print("All images already used! Recycling...")
-        available_urls = image_urls
-
-    image_url = random.choice(available_urls)
     print(f"Selected image: {image_url[:60]}...")
-    print(f"Available: {len(available_urls)} / Total: {len(image_urls)}")
 
     # ============================================
-    # Step 2: タグ・記事生成
+    # Step 3: タグ・記事生成
     # ============================================
-    tags = list(BASE_HASHTAGS)
+    tags = generate_tags(selected_media["source_key"])
 
     # トレンドタグ
     try:
@@ -755,12 +893,12 @@ def main():
         print(f"Trend tags skipped: {e}")
 
     # 記事HTML生成（画像URL埋め込み済み）
-    title, content_html = build_blog_html(image_url, tags, image_url)
+    title, content_html = build_blog_html(image_url, tags, selected_media["source_key"])
     print(f"Title: {title}")
     print(f"Content length: {len(content_html)} chars")
 
     # ============================================
-    # Step 3: 投稿
+    # Step 4: 投稿
     # ============================================
     article_url = post_to_rakuten_blog(image_url, title, content_html)
 
@@ -771,6 +909,8 @@ def main():
     # Record
     log_data["files"].append({
         'file': os.path.basename(image_url),
+        'source_key': selected_media["source_key"],
+        'source_name': selected_media["source_name"],
         'image_url': image_url,
         'article_url': article_url,
         'title': title,
@@ -778,7 +918,7 @@ def main():
     })
     save_uploaded_log(log_data)
 
-    remaining = len(available_urls) - 1
+    remaining = len(available_media) - 1
     print(f"\nDone! Remaining images: {remaining}")
     return 0
 
